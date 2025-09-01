@@ -1,0 +1,357 @@
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local StarterGui = game:GetService("StarterGui")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local CoreGui = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
+
+-- camlock Config
+local camlock = getgenv().camlock or {}
+getgenv().camlock = camlock
+
+camlock.Enabled = camlock.Enabled or false
+camlock.PredictionX = camlock.PredictionX or 0.1551
+camlock.PredictionY = camlock.PredictionY or 0.12
+camlock.JumpOffset = camlock.JumpOffset or -0.08
+camlock.FallOffset = camlock.FallOffset or 0.27
+camlock.AimPart = camlock.AimPart or "Head"
+camlock.LockedTarget = camlock.LockedTarget or nil
+camlock.AutoPred = camlock.AutoPred == nil and true or camlock.AutoPred
+camlock.AutoOffsets = camlock.AutoOffsets == nil and true or camlock.AutoOffsets
+
+-- Lock Target Logic
+local function findNearestEnemy()
+    local centerX, centerY = Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2
+    local closest, dist = nil, math.huge
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild(camlock.AimPart) then
+            local part = player.Character[camlock.AimPart]
+            local screenPos, onScreen = Camera:WorldToScreenPoint(part.Position)
+            if onScreen then
+                local dx, dy = screenPos.X - centerX, screenPos.Y - centerY
+                local distance = math.sqrt(dx * dx + dy * dy)
+                if distance < dist then
+                    dist, closest = distance, player
+                end
+            end
+        end
+    end
+    return closest
+end
+
+-- Highlight and Health Bar
+local currentHighlight = nil
+local healthBars = {}
+
+local function createHealthBar(character)
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "HealthBar"
+    billboard.Size = UDim2.new(2.5, 0, 0.3, 0)
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = character
+
+    local frame = Instance.new("Frame", billboard)
+    frame.Size = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundTransparency = 1
+
+    local bar = Instance.new("Frame", frame)
+    bar.Size = UDim2.new(humanoid.Health / humanoid.MaxHealth, 0, 1, 0)
+    bar.BackgroundColor3 = Color3.new(0, 1, 0)
+    bar.BorderSizePixel = 0
+
+    local gradient = Instance.new("UIGradient", bar)
+    gradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 50, 50)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 50)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(50, 255, 50))
+    })
+
+    local stroke = Instance.new("UIStroke", bar)
+    stroke.Color = Color3.fromRGB(255, 255, 255)
+    stroke.Thickness = 2
+
+    local tweenInfo = TweenInfo.new(1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+    local function updateHealth()
+        if humanoid and bar.Parent then
+            local healthRatio = humanoid.Health / humanoid.MaxHealth
+            TweenService:Create(bar, tweenInfo, {Size = UDim2.new(healthRatio, 0, 1, 0)}):Play()
+            bar.BackgroundColor3 = Color3.fromRGB(255 * (1 - healthRatio), 255 * healthRatio, 0)
+        else
+            billboard:Destroy()
+            healthBars[character] = nil
+        end
+    end
+
+    humanoid:GetPropertyChangedSignal("Health"):Connect(updateHealth)
+    humanoid:GetPropertyChangedSignal("MaxHealth"):Connect(updateHealth)
+    healthBars[character] = billboard
+end
+
+local function addHighlightToCharacter(character)
+    if not currentHighlight then
+        currentHighlight = Instance.new("Highlight")
+        currentHighlight.FillColor = Color3.fromRGB(255, 0, 0)
+        currentHighlight.FillTransparency = 0.5
+        currentHighlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+        currentHighlight.OutlineTransparency = 0
+        currentHighlight.Parent = CoreGui
+    end
+    currentHighlight.Adornee = character
+    createHealthBar(character)
+end
+
+local function removeHighlight()
+    if currentHighlight then
+        currentHighlight:Destroy()
+        currentHighlight = nil
+    end
+    for character, bar in pairs(healthBars) do
+        bar:Destroy()
+    end
+    healthBars = {}
+end
+
+-- Main Aimbot
+RunService.RenderStepped:Connect(function()
+    if camlock.Enabled then
+        if not camlock.LockedTarget or not camlock.LockedTarget.Character or not camlock.LockedTarget.Character:FindFirstChild(camlock.AimPart) then
+            camlock.LockedTarget = findNearestEnemy()
+        end
+
+        if camlock.LockedTarget and camlock.LockedTarget.Character and camlock.LockedTarget.Character:FindFirstChild(camlock.AimPart) then
+            local part = camlock.LockedTarget.Character[camlock.AimPart]
+            local velocity = part.Velocity
+            local predictedPos = part.Position + Vector3.new(
+                velocity.X * camlock.PredictionX,
+                velocity.Y * camlock.PredictionY + (velocity.Y > 1 and camlock.JumpOffset or velocity.Y < -1 and camlock.FallOffset or 0),
+                velocity.Z * camlock.PredictionX
+            )
+            Camera.CFrame = CFrame.new(Camera.CFrame.Position, predictedPos)
+
+            addHighlightToCharacter(camlock.LockedTarget.Character)
+        else
+            removeHighlight()
+            camlock.LockedTarget = nil
+        end
+    else
+        removeHighlight()
+        camlock.LockedTarget = nil
+    end
+end)
+
+-- Mouse Hook
+local mt = getrawmetatable(game)
+local oldIndex = mt.__index
+setreadonly(mt, false)
+mt.__index = newcclosure(function(self, key)
+    if not checkcaller() and typeof(self) == "Instance" and self:IsA("Mouse") and key == "Hit" then
+        if camlock.Enabled and camlock.LockedTarget and camlock.LockedTarget.Character and camlock.LockedTarget.Character:FindFirstChild(camlock.AimPart) then
+            local part = camlock.LockedTarget.Character[camlock.AimPart]
+            local velocity = part.Velocity
+            local predicted = part.Position + Vector3.new(
+                velocity.X * camlock.PredictionX,
+                velocity.Y * camlock.PredictionY + (velocity.Y > 1 and camlock.JumpOffset or velocity.Y < -1 and camlock.FallOffset or 0),
+                velocity.Z * camlock.PredictionX
+            )
+            return CFrame.new(predicted)
+        end
+    end
+    return oldIndex(self, key)
+end)
+setreadonly(mt, true)
+
+-- GUI
+local gui = Instance.new("ScreenGui", CoreGui)
+gui.Name = "SoulsHub"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+
+local mainFrame = Instance.new("Frame", gui)
+mainFrame.Size = UDim2.new(0, 180, 0, 100)
+mainFrame.Position = UDim2.new(0.5, -90, 0.5, -50)
+mainFrame.BackgroundTransparency = 0.1
+mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+mainFrame.Active = true
+mainFrame.Draggable = true
+
+local uicorner = Instance.new("UICorner", mainFrame)
+uicorner.CornerRadius = UDim.new(0, 16)
+
+local uistroke = Instance.new("UIStroke", mainFrame)
+uistroke.Color = Color3.fromRGB(255, 255, 255)
+uistroke.Thickness = 2
+uistroke.Transparency = 0.3
+
+local gradient = Instance.new("UIGradient", mainFrame)
+gradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(50, 50, 50)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(100, 100, 100)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(50, 50, 50))
+})
+gradient.Rotation = 45
+
+local titleLabel = Instance.new("TextLabel", mainFrame)
+titleLabel.Size = UDim2.new(1, 0, 0, 30)
+titleLabel.Position = UDim2.new(0, 0, 0, -10)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "Laws Hub"
+titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleLabel.TextSize = 24
+titleLabel.Font = Enum.Font.FredokaOne
+titleLabel.TextStrokeTransparency = 0.7
+titleLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+
+local titleGradient = Instance.new("UIGradient", titleLabel)
+titleGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(200, 200, 200)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 255, 255))
+})
+
+local toggle = Instance.new("TextButton", mainFrame)
+toggle.Size = UDim2.new(0, 140, 0, 50)
+toggle.Position = UDim2.new(0.5, -70, 0.5, -10)
+toggle.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggle.Text = "camlock OFF"
+toggle.Font = Enum.Font.FredokaOne
+toggle.TextSize = 20
+toggle.Active = true
+
+local toggleCorner = Instance.new("UICorner", toggle)
+toggleCorner.CornerRadius = UDim.new(0, 12)
+
+local toggleStroke = Instance.new("UIStroke", toggle)
+toggleStroke.Color = Color3.fromRGB(255, 255, 255)
+toggleStroke.Thickness = 2
+
+local toggleGradient = Instance.new("UIGradient", toggle)
+toggleGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 50, 50)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(50, 50, 50))
+})
+
+-- Animations
+local function animateGradient()
+    local tweenInfo = TweenInfo.new(3, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+    TweenService:Create(gradient, tweenInfo, {Rotation = 360}):Play()
+    TweenService:Create(titleGradient, tweenInfo, {Rotation = 360}):Play()
+    TweenService:Create(toggleGradient, tweenInfo, {Rotation = 360}):Play()
+end
+
+local function waterFlowEffect()
+    local effectFrame = Instance.new("Frame", mainFrame)
+    effectFrame.Size = UDim2.new(1, 0, 1, 0)
+    effectFrame.BackgroundTransparency = 0.8
+    effectFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    effectFrame.ZIndex = 0
+
+    local effectGradient = Instance.new("UIGradient", effectFrame)
+    effectGradient.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.7),
+        NumberSequenceKeypoint.new(0.5, 0.3),
+        NumberSequenceKeypoint.new(1, 0.7)
+    })
+    effectGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(200, 200, 255)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(200, 200, 255))
+    })
+
+    local tweenInfo = TweenInfo.new(2, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, -1, true)
+    TweenService:Create(effectGradient, tweenInfo, {Offset = Vector2.new(1, 0)}):Play()
+end
+
+local function hoverEffect()
+    toggle.MouseEnter:Connect(function()
+        local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        TweenService:Create(toggle, tweenInfo, {Size = UDim2.new(0, 150, 0, 55)}):Play()
+        TweenService:Create(toggleStroke, tweenInfo, {Thickness = 3}):Play()
+    end)
+    toggle.MouseLeave:Connect(function()
+        local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        TweenService:Create(toggle, tweenInfo, {Size = UDim2.new(0, 140, 0, 50)}):Play()
+        TweenService:Create(toggleStroke, tweenInfo, {Thickness = 2}):Play()
+    end)
+end
+
+animateGradient()
+waterFlowEffect()
+hoverEffect()
+
+toggle.MouseButton1Click:Connect(function()
+    camlock.Enabled = not camlock.Enabled
+    toggle.Text = camlock.Enabled and "camlock ON" or "camlock OFF"
+    toggle.BackgroundColor3 = camlock.Enabled and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(255, 0, 0)
+    toggleGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, camlock.Enabled and Color3.fromRGB(50, 255, 50) or Color3.fromRGB(255, 50, 50)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255)),
+        ColorSequenceKeypoint.new(1, camlock.Enabled and Color3.fromRGB(50, 255, 50) or Color3.fromRGB(50, 50, 50))
+    })
+    if not camlock.Enabled then
+        camlock.LockedTarget = nil
+        removeHighlight()
+    end
+end)
+
+-- Input Support for PC and Mobile
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.C or input.KeyCode == Enum.KeyCode.DPadDown or input.UserInputType == Enum.UserInputType.Touch then
+        toggle:Activate()
+    end
+end)
+
+-- Improved Auto Prediction / Offset
+local function clampPing(ms)
+    return math.clamp(ms, 30, 300)
+end
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        local ping = 50
+        pcall(function()
+            local stats = game:GetService("Stats"):FindFirstChild("Network")
+            if stats then
+                local stat = stats:FindFirstChild("DataPing")
+                if stat then ping = tonumber(stat.Value) or ping end
+            end
+        end)
+
+        ping = clampPing(ping)
+
+        if camlock.AutoPred then
+            local scaled = (ping - 30) / (300 - 30)
+            camlock.PredictionX = 0.1 + (0.31 * scaled)
+            camlock.PredictionY = 0.09 + (0.23 * scaled)
+        end
+
+        if camlock.AutoOffsets then
+            if ping <= 60 then
+                camlock.JumpOffset = -0.08
+                camlock.FallOffset = 0.25
+            elseif ping <= 100 then
+                camlock.JumpOffset = -0.09
+                camlock.FallOffset = 0.3
+            elseif ping <= 150 then
+                camlock.JumpOffset = -0.1
+                camlock.FallOffset = 0.35
+            elseif ping <= 225 then
+                camlock.JumpOffset = -0.12
+                camlock.FallOffset = 0.4
+            else
+                camlock.JumpOffset = -0.14
+                camlock.FallOffset = 0.45
+            end
+        end
+    end
+end)
