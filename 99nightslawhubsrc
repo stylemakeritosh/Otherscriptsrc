@@ -1319,4 +1319,5 @@ Window:Notify({
     Title = "Laws Hub",
     Desc = "Laws Hub loaded successfully!",
     Time = 4
+
 })
